@@ -1,0 +1,4 @@
+nets.db
+.streamlit/secrets.toml
+__pycache__/
+.venv/
