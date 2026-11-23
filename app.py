@@ -59,7 +59,7 @@ sp = sa.Table("session_players", md, C("id", sa.Integer, primary_key=True),
 
 @st.cache_resource
 def get_engine():
-    e = sa.create_engine(secret("DATABASE_URL", "sqlite:///nets.db"), pool_pre_ping=True)
+    e = sa.create_engine(secret("DATABASE_URL", "sqlite:///nets.db"), pool_pre_ping=True,, pool_recycle=300)
     md.create_all(e)
     if e.dialect.name == "postgresql":  # lock the tables away from Supabase's public API
         with e.begin() as c:
