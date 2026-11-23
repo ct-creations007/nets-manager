@@ -18,7 +18,7 @@ EXPECTED_BASIS = "selected"
 def secret(key, default=None):
     try:
         return st.secrets[key]
-    except Exception:
+    except (KeyError, FileNotFoundError):
         return os.environ.get(key, default)
 
 
@@ -59,7 +59,7 @@ sp = sa.Table("session_players", md, C("id", sa.Integer, primary_key=True),
 
 @st.cache_resource
 def get_engine():
-    e = sa.create_engine(secret("DATABASE_URL", "sqlite:///nets.db"), pool_pre_ping=True,, pool_recycle=300)
+    e = sa.create_engine(secret("DATABASE_URL"), pool_pre_ping=True, pool_recycle=300)
     md.create_all(e)
     if e.dialect.name == "postgresql":  # lock the tables away from Supabase's public API
         with e.begin() as c:
@@ -67,10 +67,11 @@ def get_engine():
                 c.execute(sa.text(f'ALTER TABLE "{t}" ENABLE ROW LEVEL SECURITY'))
     return e
 
-if not secret("DATABASE_URL"):
-    st.error("DATABASE_URL is not configured, so data would not be saved. Check the app's Secrets.")
-    st.stop()
 
+if not secret("DATABASE_URL"):
+    st.error("DATABASE_URL is not configured, so data would not be saved. "
+             "Add it to the app's Secrets (cloud) or .streamlit/secrets.toml (local).")
+    st.stop()
 eng = get_engine()
 
 
@@ -263,7 +264,15 @@ def page_attendance():
         d[c] = d[c].fillna(False).astype(bool)
     d["amount_paid"] = d.amount_paid.fillna(0.0)
     d["paid_date"] = [to_date(v) for v in d.paid_date]
-    st.caption(f"Fee per player: £{fee:,.2f}. Ticking Paid with no amount records the full fee.")
+    st.caption(f"Fee per player: £{fee:,.2f}. Tick Paid and Save to record the full fee. "
+               "Type an amount only for a part-payment.")
+    if st.button("✅ Mark all attended players as paid (full fee)"):
+        with eng.begin() as c:
+            c.execute(sp.update().where(sp.c.session_id == sid, sp.c.attended.is_(True),
+                                        sp.c.paid.is_(False))
+                      .values(paid=True, amount_paid=fee, paid_date=date.today()))
+        st.session_state.pop(f"att{sid}", None)
+        st.rerun()
     key = f"att{sid}"
     ed = st.data_editor(
         d, hide_index=True, use_container_width=True, key=key, disabled=["name"],
@@ -274,14 +283,18 @@ def page_attendance():
                                                                     step=0.5, format="%.2f"),
                        "paid_date": st.column_config.DateColumn("Paid on")})
     if st.button("Save attendance & payments", type="primary"):
+        orig = d.set_index("id")
         with eng.begin() as c:
             for _, x in ed.iterrows():
+                rid = int(x["id"])
                 amt = 0.0 if pd.isna(x["amount_paid"]) else float(x["amount_paid"])
                 paid = bool(x["paid"])
                 if paid and amt == 0:
-                    amt = fee
+                    amt = fee    # ticked Paid, nothing typed: use the session fee
+                elif not paid and orig.loc[rid, "paid"] and amt == orig.loc[rid, "amount_paid"]:
+                    amt = 0.0    # un-ticked Paid: clear the auto-filled amount
                 pdte = to_date(x["paid_date"]) or (date.today() if (paid or amt > 0) else None)
-                c.execute(sp.update().where(sp.c.id == int(x["id"])).values(
+                c.execute(sp.update().where(sp.c.id == rid).values(
                     attended=bool(x["attended"]), paid=paid, amount_paid=amt, paid_date=pdte))
         st.session_state.pop(key, None)
         st.rerun()
@@ -398,5 +411,5 @@ PAGES = {"Teams & Players": page_teams, "Sessions": page_sessions,
          "Attendance & Payments": page_attendance, "Dashboard": page_dashboard,
          "Player Profile": page_profile}
 st.sidebar.title("🏏 Nets Manager")
-st.sidebar.caption("Database: " + eng.dialect.name)
+st.sidebar.caption(f"DB: {eng.dialect.name} @ {eng.url.host or 'local file'}")
 PAGES[st.sidebar.radio("Go to", list(PAGES))]()
