@@ -9,7 +9,35 @@ import pandas as pd
 import sqlalchemy as sa
 import streamlit as st
 
-st.set_page_config(page_title="Nets Manager", page_icon="🏏", layout="wide")
+CLUB_NAME = "MK Rifles Cricket Club"  # <- change to your club's name
+GREEN = "#14532D"
+_here = os.path.dirname(os.path.abspath(__file__))
+LOGO = next((os.path.join(_here, "assets", f) for f in ("logo.png", "logo.jpg", "logo.jpeg", "logo.svg")
+             if os.path.exists(os.path.join(_here, "assets", f))), None)
+
+st.set_page_config(page_title=f"{CLUB_NAME} - Nets Manager", page_icon=LOGO or "🏏", layout="wide")
+if LOGO:
+    st.logo(LOGO)
+
+CSS = """
+.block-container { padding-top: 2rem; max-width: 1200px; }
+h1, h2, h3 { color: #14532D; font-weight: 700; }
+h2 { border-bottom: 3px solid #B3261E; padding-bottom: .3rem; margin-bottom: 1rem; }
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #0B3D20 0%, #14532D 100%); }
+[data-testid="stSidebar"] * { color: #F3EFE0; }
+[data-testid="stLogo"] { height: 3.2rem; }
+[data-testid="stSidebarNavLink"] { border-radius: 10px; margin: 2px 6px; padding: .5rem .8rem; }
+[data-testid="stSidebarNavLink"]:hover { background: rgba(255,255,255,.14); }
+[data-testid="stSidebarNavLink"][aria-current="page"] { background: #B3261E; font-weight: 600; }
+[data-testid="stMetric"] { background: #FFFFFF; border: 1px solid #E3DCC8; border-left: 6px solid #14532D;
+    border-radius: 12px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+[data-testid="stMetricLabel"] p { color: #5B6B61; font-weight: 600; }
+[data-testid="stMetricValue"] { color: #14532D; }
+.stButton > button, .stDownloadButton > button { border-radius: 8px; font-weight: 600; }
+[data-testid="stDataFrame"] { border: 1px solid #E3DCC8; border-radius: 10px; overflow: hidden; }
+footer { visibility: hidden; }
+"""
+st.markdown(f"<style>{CSS}</style>", unsafe_allow_html=True)
 
 # "selected": fee is due from every selected player; "attended": only from those who attended
 EXPECTED_BASIS = "selected"
@@ -25,6 +53,10 @@ def secret(key, default=None):
 # ---------------- password gate ----------------
 PW = secret("APP_PASSWORD")
 if PW and not st.session_state.get("ok"):
+    if LOGO:
+        st.image(LOGO, width=150)
+    st.title(CLUB_NAME)
+    st.caption("Nets Manager - sign in to continue")
     entered = st.text_input("Password", type="password")
     if entered and hmac.compare_digest(entered, str(PW)):
         st.session_state.ok = True
@@ -315,8 +347,8 @@ def page_attendance():
     m[2].metric("Collected", f"£{s.amount_paid.sum():,.2f}")
     m[3].metric("Outstanding", f"£{s.outstanding.sum():,.2f}")
     a, b = st.columns(2)
-    a.bar_chart(pd.DataFrame({"Players": [att, n - att]}, index=["Attended", "Did not attend"]))
-    b.bar_chart(pd.DataFrame({"Players": [paid_n, pend]}, index=["Paid", "Pending"]))
+    a.bar_chart(pd.DataFrame({"Players": [att, n - att]}, index=["Attended", "Did not attend"]), color=GREEN)
+    b.bar_chart(pd.DataFrame({"Players": [paid_n, pend]}, index=["Paid", "Pending"]), color=GREEN)
 
 
 def page_dashboard():
@@ -361,12 +393,12 @@ def page_dashboard():
 
     a, b = st.columns(2)
     a.caption("Attendance % by player")
-    a.bar_chart(g.set_index("player")["attendance_%"])
+    a.bar_chart(g.set_index("player")["attendance_%"], color=GREEN)
     t = df.groupby("session_date").agg(attended=("attended", "sum"), collected=("amount_paid", "sum"))
     b.caption("Attendees per session")
-    b.line_chart(t.attended)
+    b.line_chart(t.attended, color=GREEN)
     st.caption("Collected per session (£)")
-    st.bar_chart(t.collected)
+    st.bar_chart(t.collected, color=GREEN)
 
     out = df.drop(columns=["id", "session_id", "team_id", "player_id"])
     out["session_date"] = out.session_date.dt.date
@@ -407,9 +439,17 @@ def page_profile():
     st.dataframe(v, hide_index=True, use_container_width=True)
 
 
-PAGES = {"Teams & Players": page_teams, "Sessions": page_sessions,
-         "Attendance & Payments": page_attendance, "Dashboard": page_dashboard,
-         "Player Profile": page_profile}
-st.sidebar.title("🏏 Nets Manager")
-st.sidebar.caption(f"DB: {eng.dialect.name} @ {eng.url.host or 'local file'}")
-PAGES[st.sidebar.radio("Go to", list(PAGES))]()
+nav = st.navigation({
+    "Manage": [
+        st.Page(page_teams, title="Teams & Players", icon=":material/groups:"),
+        st.Page(page_sessions, title="Sessions", icon=":material/event:"),
+        st.Page(page_attendance, title="Attendance & Payments", icon=":material/fact_check:"),
+    ],
+    "Insights": [
+        st.Page(page_dashboard, title="Dashboard", icon=":material/monitoring:", default=True),
+        st.Page(page_profile, title="Player Profile", icon=":material/person:"),
+    ],
+})
+st.sidebar.divider()
+st.sidebar.caption(f"{CLUB_NAME}  |  DB: {eng.dialect.name} @ {eng.url.host or 'local file'}")
+nav.run()
