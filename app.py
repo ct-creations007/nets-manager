@@ -67,6 +67,9 @@ def get_engine():
                 c.execute(sa.text(f'ALTER TABLE "{t}" ENABLE ROW LEVEL SECURITY'))
     return e
 
+if not secret("DATABASE_URL"):
+    st.error("DATABASE_URL is not configured, so data would not be saved. Check the app's Secrets.")
+    st.stop()
 
 eng = get_engine()
 
@@ -395,4 +398,5 @@ PAGES = {"Teams & Players": page_teams, "Sessions": page_sessions,
          "Attendance & Payments": page_attendance, "Dashboard": page_dashboard,
          "Player Profile": page_profile}
 st.sidebar.title("🏏 Nets Manager")
+st.sidebar.caption("Database: " + eng.dialect.name)
 PAGES[st.sidebar.radio("Go to", list(PAGES))]()
