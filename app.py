@@ -10,7 +10,7 @@ import pandas as pd
 import sqlalchemy as sa
 import streamlit as st
 
-CLUB_NAME = "Your Cricket Club"  # <- change to your club's name
+CLUB_NAME = "MK Rifles Cricket Club"  # <- change to your club's name
 GREEN = "#14532D"
 _here = os.path.dirname(os.path.abspath(__file__))
 LOGO = next((os.path.join(_here, "assets", f) for f in ("logo.png", "logo.jpg", "logo.jpeg", "logo.svg")
