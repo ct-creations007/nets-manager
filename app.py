@@ -5,11 +5,12 @@ import io
 import os
 from datetime import date
 
+import altair as alt
 import pandas as pd
 import sqlalchemy as sa
 import streamlit as st
 
-CLUB_NAME = "MK Rifles Cricket Club"  # <- change to your club's name
+CLUB_NAME = "Your Cricket Club"  # <- change to your club's name
 GREEN = "#14532D"
 _here = os.path.dirname(os.path.abspath(__file__))
 LOGO = next((os.path.join(_here, "assets", f) for f in ("logo.png", "logo.jpg", "logo.jpeg", "logo.svg")
@@ -351,54 +352,113 @@ def page_attendance():
     b.bar_chart(pd.DataFrame({"Players": [paid_n, pend]}, index=["Paid", "Pending"]), color=GREEN)
 
 
-def page_dashboard():
-    st.header("Overall Dashboard")
+def dash_data(key):
+    """Shared filters + per-player stats. Returns (df, g, ses) or None.
+    Attendance is measured against ALL sessions the team held (up to today), not just the ones a player polled for."""
     df = all_rows()
     if df.empty:
         st.info("No data yet.")
-        return
+        return None
+    today = date.today()
     c1, c2, c3 = st.columns(3)
-    rng = c1.date_input("Date range", (df.session_date.min().date(), df.session_date.max().date()))
-    tm = c2.multiselect("Team", sorted(df.team.unique()))
-    pl = c3.multiselect("Player", sorted(df.player.unique()))
-    if len(rng) == 2:
-        df = df[df.session_date.dt.date.between(rng[0], rng[1])]
-    if tm:
-        df = df[df.team.isin(tm)]
+    rng = c1.date_input("Date range", (df.session_date.min().date(), df.session_date.max().date()), key=f"{key}_rng")
+    tm = c2.multiselect("Team", sorted(df.team.unique()), key=f"{key}_tm")
+    pl = c3.multiselect("Player", sorted(df.player.unique()), key=f"{key}_pl")
+    ses = q("select s.id as session_id, t.name as team, s.session_date, s.venue "
+            "from sessions s join teams t on t.id = s.team_id")
+    ses["session_date"] = pd.to_datetime(ses.session_date)
+
+    def keep(x):
+        x = x[x.session_date.dt.date <= today]  # upcoming sessions are excluded
+        if len(rng) == 2:
+            x = x[x.session_date.dt.date.between(rng[0], rng[1])]
+        return x[x.team.isin(tm)] if tm else x
+
+    df, ses = keep(df), keep(ses)
     if pl:
         df = df[df.player.isin(pl)]
-    if df.empty:
-        st.warning("No records match the filters.")
+    if ses.empty:
+        st.warning("No sessions match the filters.")
+        return None
+
+    agg = df.groupby("player_id").agg(
+        polled_yes=("id", "count"), attended=("attended", "sum"), expected=("expected", "sum"),
+        paid=("amount_paid", "sum"), outstanding=("outstanding", "sum")).reset_index()
+    base = q("select p.id as player_id, p.name as player, t.name as team, p.active "
+             "from players p join teams t on t.id = p.team_id")
+    if tm:
+        base = base[base.team.isin(tm)]
+    if pl:
+        base = base[base.player.isin(pl)]
+    base = base[base.active.astype(bool) | base.player_id.isin(agg.player_id)]
+    g = base.drop(columns="active").merge(agg, on="player_id", how="left")
+    num = ["polled_yes", "attended", "expected", "paid", "outstanding"]
+    g[num] = g[num].fillna(0)
+    g[["polled_yes", "attended"]] = g[["polled_yes", "attended"]].astype(int)
+    if g.empty:
+        st.warning("No players match the filters.")
+        return None
+    g["total_sessions"] = g.team.map(ses.groupby("team").size()).fillna(0).astype(int)
+    g["total_sessions"] = g[["total_sessions", "polled_yes"]].max(axis=1)
+    g["no_show"] = g.polled_yes - g.attended
+    g["attendance_%"] = (100 * g.attended / g.total_sessions.where(g.total_sessions > 0)).fillna(0).round(1)
+    g["showup_%"] = (100 * g.attended / g.polled_yes.where(g.polled_yes > 0)).fillna(0).round(1)
+    g["payment_%"] = (100 * (1 - g.outstanding / g.expected.where(g.expected > 0))).fillna(100).clip(0, 100).round(1)
+    g["label"] = g.player if g.team.nunique() == 1 else g.player + " (" + g.team + ")"
+    return df, g, ses
+
+
+def page_dashboard():
+    st.header("Overall Dashboard")
+    r = dash_data("dash")
+    if r is None:
         return
+    df, g, ses = r
     m = st.columns(4)
-    m[0].metric("Sessions", df.session_id.nunique())
+    m[0].metric("Sessions held", len(ses))
     m[1].metric("Total attendances", int(df.attended.sum()))
     m[2].metric("Collected", f"£{df.amount_paid.sum():,.2f}")
     m[3].metric("Outstanding", f"£{df.outstanding.sum():,.2f}")
+    st.caption("Attendance % = sessions attended ÷ all sessions the team held, whether or not the player "
+               "voted yes. Upcoming sessions are excluded.")
 
-    g = df.groupby(["team", "player"]).agg(
-        selected=("id", "count"), attended=("attended", "sum"), expected=("expected", "sum"),
-        paid=("amount_paid", "sum"), outstanding=("outstanding", "sum")).reset_index()
-    g["missed"] = g.selected - g.attended
-    g["attendance_%"] = (100 * g.attended / g.selected).round(1)
-    g["payment_%"] = (100 * (1 - g.outstanding / g.expected.where(g.expected > 0))).fillna(100).clip(0, 100).round(1)
+    st.subheader("Attendance by player (out of total sessions)")
+    mx = int(g.total_sessions.max())
+    order = g.sort_values(["attendance_%", "attended"], ascending=False).label.tolist()
+    g["text"] = (g.attended.astype(str) + "/" + g.total_sessions.astype(str)
+                 + "  (" + g["attendance_%"].astype(str) + "%)")
+    sc = alt.Scale(domain=[0, mx * 1.35])
+    y = alt.Y("label:N", sort=order, title=None)
+    ticks = list(range(0, mx + 1, max(1, mx // 10)))
+    track = alt.Chart(g).mark_bar(color="#D9D3C0").encode(
+        x=alt.X("total_sessions:Q", scale=sc, title="Sessions (full bar = all sessions held)",
+                axis=alt.Axis(values=ticks)), y=y)
+    done = alt.Chart(g).mark_bar(color=GREEN).encode(
+        x=alt.X("attended:Q", scale=sc, title=None, axis=None), y=y,
+        tooltip=[alt.Tooltip("label:N", title="Player"), alt.Tooltip("attended:Q", title="Attended"),
+                 alt.Tooltip("total_sessions:Q", title="Total sessions"),
+                 alt.Tooltip("attendance_%:Q", title="Attendance %")])
+    txt = alt.Chart(g).mark_text(align="left", dx=5, color="#1F2A24").encode(
+        x=alt.X("total_sessions:Q", scale=sc, title=None, axis=None), y=y, text="text:N")
+    st.altair_chart((track + done + txt).properties(height=max(220, 34 * len(g))), use_container_width=True)
+
     st.subheader("Player-wise statistics")
-    st.dataframe(g, hide_index=True, use_container_width=True)
+    cols = ["team", "player", "total_sessions", "polled_yes", "attended", "no_show", "attendance_%",
+            "showup_%", "expected", "paid", "outstanding", "payment_%"]
+    st.dataframe(g[cols].sort_values("attendance_%", ascending=False), hide_index=True, use_container_width=True)
 
     thr = st.slider("Flag players with attendance below (%)", 0, 100, 60)
     flag = g[(g["attendance_%"] < thr) | (g.outstanding > 0)]
-    st.subheader("Needs attention (frequent absences or pending payments)")
-    st.dataframe(flag[["team", "player", "attendance_%", "missed", "outstanding"]],
+    st.subheader("Needs attention (low attendance or pending payments)")
+    st.dataframe(flag[["team", "player", "attendance_%", "no_show", "outstanding"]],
                  hide_index=True, use_container_width=True)
 
-    a, b = st.columns(2)
-    a.caption("Attendance % by player")
-    a.bar_chart(g.set_index("player")["attendance_%"], color=GREEN)
     t = df.groupby("session_date").agg(attended=("attended", "sum"), collected=("amount_paid", "sum"))
-    b.caption("Attendees per session")
-    b.line_chart(t.attended, color=GREEN)
-    st.caption("Collected per session (£)")
-    st.bar_chart(t.collected, color=GREEN)
+    a, b = st.columns(2)
+    a.caption("Attendees per session")
+    a.line_chart(t.attended, color=GREEN)
+    b.caption("Collected per session (£)")
+    b.bar_chart(t.collected, color=GREEN)
 
     out = df.drop(columns=["id", "session_id", "team_id", "player_id"])
     out["session_date"] = out.session_date.dt.date
@@ -407,9 +467,59 @@ def page_dashboard():
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         out.to_excel(w, index=False, sheet_name="Detail")
-        g.to_excel(w, index=False, sheet_name="Players")
+        g[cols].to_excel(w, index=False, sheet_name="Players")
     d2.download_button("⬇️ Excel", buf.getvalue(), "nets_report.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def page_poll():
+    st.header("Poll vs Attendance")
+    r = dash_data("poll")
+    if r is None:
+        return
+    df, g, ses = r
+    polled, att = len(df), int(df.attended.sum())
+    m = st.columns(4)
+    m[0].metric("Polled yes", polled)
+    m[1].metric("Attended", att)
+    m[2].metric("Did not attend", polled - att)
+    m[3].metric("Show-up rate", f"{(100 * att / polled if polled else 0):.1f}%")
+    st.caption("Counts only players who voted yes (were selected). Upcoming sessions are excluded.")
+    domain = alt.Scale(domain=["Attended", "Did not attend"], range=[GREEN, "#B3261E"])
+    legend = alt.Legend(orient="bottom", title=None)
+
+    st.subheader("By player: polled yes, attended vs did not attend")
+    gp = g[g.polled_yes > 0]
+    if gp.empty:
+        st.info("No polled players in this selection.")
+    else:
+        order = gp.sort_values(["polled_yes", "attended"], ascending=False).label.tolist()
+        lp = gp.melt(id_vars=["label"], value_vars=["attended", "no_show"], var_name="status", value_name="sessions")
+        lp["status"] = lp.status.map({"attended": "Attended", "no_show": "Did not attend"})
+        st.altair_chart(alt.Chart(lp).mark_bar().encode(
+            x=alt.X("sessions:Q", title="Sessions polled yes", axis=alt.Axis(tickMinStep=1)),
+            y=alt.Y("label:N", sort=order, title=None),
+            color=alt.Color("status:N", scale=domain, legend=legend),
+            tooltip=[alt.Tooltip("label:N", title="Player"), alt.Tooltip("status:N", title="Status"),
+                     alt.Tooltip("sessions:Q", title="Sessions")],
+        ).properties(height=max(220, 34 * len(gp))), use_container_width=True)
+        st.dataframe(gp[["team", "player", "polled_yes", "attended", "no_show", "showup_%"]]
+                     .sort_values("no_show", ascending=False), hide_index=True, use_container_width=True)
+
+    st.subheader("By session")
+    ps = (df.groupby(["session_id", "session_date", "venue"])
+          .agg(polled=("id", "count"), attended=("attended", "sum")).reset_index().sort_values("session_date"))
+    ps["no_show"] = ps.polled - ps.attended
+    ps["label"] = ps.session_date.dt.strftime("%d %b %Y") + ps.venue.apply(lambda v: f" {v}" if v else "")
+    ls = ps.melt(id_vars=["label"], value_vars=["attended", "no_show"], var_name="status", value_name="players")
+    ls["status"] = ls.status.map({"attended": "Attended", "no_show": "Did not attend"})
+    st.altair_chart(alt.Chart(ls).mark_bar().encode(
+        x=alt.X("label:N", sort=ps.label.tolist(), title=None, axis=alt.Axis(labelAngle=-45)),
+        y=alt.Y("players:Q", title="Players polled yes", axis=alt.Axis(tickMinStep=1)),
+        color=alt.Color("status:N", scale=domain, legend=legend),
+        tooltip=[alt.Tooltip("label:N", title="Session"), alt.Tooltip("status:N", title="Status"),
+                 alt.Tooltip("players:Q", title="Players")],
+    ).properties(height=320), use_container_width=True)
 
 
 def page_profile():
@@ -447,6 +557,7 @@ nav = st.navigation({
     ],
     "Insights": [
         st.Page(page_dashboard, title="Dashboard", icon=":material/monitoring:", default=True),
+        st.Page(page_poll, title="Poll vs Attendance", icon=":material/compare_arrows:"),
         st.Page(page_profile, title="Player Profile", icon=":material/person:"),
     ],
 })
